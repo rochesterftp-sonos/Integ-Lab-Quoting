@@ -1,0 +1,1477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DevQuote</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=DM+Sans:wght@300;400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'dq-bg': '#0d0d0f',
+            'dq-surface': '#16161a',
+            'dq-surface-light': '#1e1e24',
+            'dq-border': '#2a2a32',
+            'dq-accent': '#e8ff47',
+            'dq-text': '#e4e4e7',
+            'dq-text-dim': '#71717a',
+            'dq-success': '#22c55e',
+            'dq-danger': '#ef4444',
+            'dq-warning': '#f59e0b',
+          },
+          fontFamily: {
+            heading: ['Syne', 'sans-serif'],
+            body: ['DM Sans', 'sans-serif'],
+            mono: ['DM Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: 'DM Sans', sans-serif; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes flash { 0%, 100% { background-color: transparent; } 50% { background-color: rgba(232, 255, 71, 0.08); } }
+    .animate-slide-in { animation: slideIn 0.4s ease-out; }
+    .animate-flash { animation: flash 0.6s ease-out; }
+    @media print {
+      body { background: white !important; color: #111 !important; font-size: 11pt; }
+      .no-print { display: none !important; }
+      .print-only { display: block !important; }
+      .print-proposal { padding: 0 !important; }
+      .print-proposal * { color: #111 !important; border-color: #ccc !important; }
+      .print-proposal h1, .print-proposal h2, .print-proposal h3 { color: #000 !important; }
+      .print-proposal .accent-text { color: #333 !important; font-weight: 700; }
+      .print-proposal section { break-inside: avoid; margin-bottom: 1.5em; }
+    }
+  </style>
+</head>
+<body class="bg-dq-bg text-dq-text min-h-screen">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+    // ─── Storage (API-backed with localStorage cache) ──────────────
+    const store = (() => {
+      const ls = typeof localStorage !== 'undefined' ? localStorage : { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+      return {
+        get(key) { try { const v = ls.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; } },
+        set(key, val) {
+          ls.setItem(key, JSON.stringify(val));
+          fetch(`/api/store/${encodeURIComponent(key)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(val) }).catch(() => {});
+        },
+        del(key) {
+          ls.removeItem(key);
+          fetch(`/api/store/${encodeURIComponent(key)}`, { method: 'DELETE' }).catch(() => {});
+        },
+        async load(key) {
+          try {
+            const resp = await fetch(`/api/store/${encodeURIComponent(key)}`);
+            const data = await resp.json();
+            if (data != null) { ls.setItem(key, JSON.stringify(data)); return data; }
+          } catch {}
+          return this.get(key);
+        }
+      };
+    })();
+
+    // ─── Utilities ─────────────────────────────────────────────────────
+    const uuid = () => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'xxxx-xxxx-xxxx'.replace(/x/g, () => ((Math.random() * 16) | 0).toString(16));
+    const fmt = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n);
+    const fmtDec = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+    const fmtNum = (n, d = 1) => new Intl.NumberFormat('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }).format(n);
+    const roundUp500 = n => Math.ceil(n / 500) * 500;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    // ─── Default Data ──────────────────────────────────────────────────
+    const DEFAULT_RATE_CARD = {
+      lastUpdated: new Date().toISOString(),
+      laborRates: { hourlyRate: 150, blendedRate: 150, claudeCodeEfficiency: 0.4 },
+      phases: [
+        { id: 'discovery', name: 'Discovery & Customer Meetings', description: 'Initial meeting, requirements gathering', minHours: 2, maxHours: 4, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'prd', name: 'PRD Generation & Sign-off', description: 'Load meeting transcripts into Claude, generate PRD.md, client sign-off', minHours: 1, maxHours: 3, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'design', name: 'Design', description: 'UI/UX design via Claude Code', minHours: 4, maxHours: 16, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'build', name: 'Development Build', description: 'Claude Code assisted development from PRD.md', minHours: 8, maxHours: 40, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'qa_internal', name: 'Internal QA', description: 'Human QA pass, documented findings, fixes, retest', minHours: 4, maxHours: 16, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'security', name: 'Security Review', description: 'Code and security audit', minHours: 2, maxHours: 8, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'customer_first_look', name: 'Customer First Look', description: 'Client review session and feedback collection', minHours: 1, maxHours: 2, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'feature_tuning', name: 'Feature Tuning', description: 'Adjustments based on first look feedback (capped at 2 rounds)', minHours: 2, maxHours: 8, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'customer_second_look', name: 'Customer Second Look', description: 'Second client review and acceptance check', minHours: 1, maxHours: 2, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'documentation', name: 'Documentation Review', description: 'Technical and user documentation generated and reviewed', minHours: 1, maxHours: 4, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'customer_acceptance', name: 'Customer Acceptance', description: 'Final sign-off and handoff', minHours: 1, maxHours: 2, includeInProposal: true, claudeCodeApplies: false },
+        { id: 'change_window', name: '14-Day Change Window', description: 'Up to 2 minor changes post-acceptance. Minor = no logic changes, UI only, under 2 hours each.', minHours: 0, maxHours: 4, includeInProposal: true, claudeCodeApplies: true },
+        { id: 'break_fix', name: '30-Day Break-Fix (No Support Contract)', description: 'Bug fixes within original spec only. Excludes new features.', minHours: 0, maxHours: 8, includeInProposal: false, claudeCodeApplies: false },
+      ],
+      llmPricing: [
+        { id: 'claude-haiku-3-5', name: 'Claude Haiku 3.5', provider: 'Anthropic', inputCostPer1MTokens: 0.80, outputCostPer1MTokens: 4.00 },
+        { id: 'claude-sonnet-4', name: 'Claude Sonnet 4', provider: 'Anthropic', inputCostPer1MTokens: 3.00, outputCostPer1MTokens: 15.00 },
+        { id: 'claude-opus-4', name: 'Claude Opus 4', provider: 'Anthropic', inputCostPer1MTokens: 15.00, outputCostPer1MTokens: 75.00 },
+        { id: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI', inputCostPer1MTokens: 2.50, outputCostPer1MTokens: 10.00 },
+        { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', inputCostPer1MTokens: 0.15, outputCostPer1MTokens: 0.60 },
+      ],
+      hostingTiers: [
+        { id: 'managed-small', name: 'Managed Small', description: 'Render, Railway, Vercel — hobby/startup scale', monthlyLow: 20, monthlyHigh: 100 },
+        { id: 'managed-production', name: 'Managed Production', description: 'Render/Railway production tier, Vercel Pro', monthlyLow: 100, monthlyHigh: 500 },
+        { id: 'cloud-small', name: 'Cloud Hosted — Small', description: 'AWS / GCP / Azure small workloads', monthlyLow: 200, monthlyHigh: 800 },
+        { id: 'cloud-enterprise', name: 'Cloud Hosted — Enterprise', description: 'AWS / GCP / Azure production, HA, multi-region', monthlyLow: 800, monthlyHigh: 3000 },
+        { id: 'on-prem', name: 'On-Premises', description: 'Client-managed infrastructure — outputs labor estimate only', monthlyLow: 0, monthlyHigh: 0 },
+      ],
+      supportContract: { monthlyLow: 800, monthlyHigh: 1200, description: 'Priority response, minor changes, ongoing maintenance' },
+      targetMargin: 60,
+    };
+
+    const DEFAULT_SETTINGS = { agencyName: 'Your Agency', preparerName: '', defaultClientMessage: 'Upon acceptance, we will schedule a kickoff meeting and begin the discovery phase.', apiKey: '', pandadocApiKey: '' };
+
+    function createNewQuote(rateCard) {
+      return {
+        id: uuid(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        projectName: '',
+        clientName: '',
+        clientContact: '',
+        projectSummary: '',
+        requirements: '',
+        deliverables: '',
+        claudeCodeEnabled: true,
+        complexity: { score: 1.0, rationale: '', flags: [], manualOverride: null, manualOverrideNote: '' },
+        phases: rateCard.phases.map(p => ({ phaseId: p.id, hoursEstimate: 0, included: true, notes: '', hoursAdjustment: 0 })),
+        tco: { llmModelId: 'claude-sonnet-4', estimatedCallsPerDay: 100, avgInputTokensPerCall: 500, avgOutputTokensPerCall: 800, hostingTierId: 'managed-production', supportContractIncluded: false },
+        finalPrice: 0,
+        priceOverride: null,
+        priceOverrideNote: '',
+        status: 'draft',
+      };
+    }
+
+    const COMPLEXITY_SYSTEM_PROMPT = `You are a software project complexity evaluator for a development agency.
+Your job is to read project requirements and assign a complexity multiplier
+that will be applied to base hour estimates.
+
+Evaluate the following signals:
+- Number and complexity of third-party integrations
+- Authentication and user management requirements
+- Data complexity and volume
+- Custom business logic vs standard CRUD operations
+- Design complexity and number of distinct UI states
+- Number of distinct user roles
+- Real-time or performance-sensitive requirements
+- Ambiguity or incompleteness in the requirements (ambiguity increases risk, raise the score)
+- Regulatory or compliance requirements
+- Mobile or cross-platform requirements
+
+Return ONLY valid JSON in this exact format, no other text:
+{
+  "score": 1.2,
+  "rationale": "Brief 2-3 sentence explanation of the score.",
+  "flags": ["list", "of", "specific", "risk", "items"]
+}
+
+Score guide:
+1.0 = Clean, simple, well-specified build. Standard CRUD, no integrations.
+1.25 = Moderate complexity. 1-2 integrations or some custom logic.
+1.5 = Significant complexity. Multiple systems, ambiguous requirements, or custom logic throughout.
+2.0 = High complexity. Real-time features, complex data architecture, security-sensitive, or heavily underspecified.
+2.5 = Enterprise scope. Flag this as likely exceeding a 30-day project window.`;
+
+    // ─── Calculation Helpers ───────────────────────────────────────────
+    function getActiveComplexity(quote) {
+      return quote.complexity.manualOverride != null ? quote.complexity.manualOverride : quote.complexity.score;
+    }
+
+    function calcPhaseHoursRange(ratePhase, ccEnabled, ccEfficiency, complexity) {
+      const ccApplied = ccEnabled && ratePhase.claudeCodeApplies;
+      const factor = ccApplied ? (1 - ccEfficiency) : 1;
+      return {
+        min: ratePhase.minHours * factor * complexity,
+        max: ratePhase.maxHours * factor * complexity,
+        mid: ((ratePhase.minHours + ratePhase.maxHours) / 2) * factor * complexity,
+        baseMin: ratePhase.minHours,
+        baseMax: ratePhase.maxHours,
+        compressed: ccApplied,
+      };
+    }
+
+    function calcQuoteSummary(quote, rateCard) {
+      const complexity = getActiveComplexity(quote);
+      const rate = rateCard.laborRates.hourlyRate;
+      let totalMin = 0, totalMax = 0, totalMid = 0;
+      const phaseDetails = [];
+
+      for (const qp of quote.phases) {
+        const rp = rateCard.phases.find(p => p.id === qp.phaseId);
+        if (!rp || !qp.included) continue;
+        const hrs = calcPhaseHoursRange(rp, quote.claudeCodeEnabled, rateCard.laborRates.claudeCodeEfficiency, complexity);
+        const adj = qp.hoursAdjustment || 0;
+        hrs.min = Math.max(0, hrs.min + adj);
+        hrs.max = Math.max(0, hrs.max + adj);
+        hrs.mid = Math.max(0, hrs.mid + adj);
+        totalMin += hrs.min;
+        totalMax += hrs.max;
+        totalMid += hrs.mid;
+        phaseDetails.push({ ...qp, rateDef: rp, hours: hrs, cost: hrs.mid * rate });
+      }
+
+      const estCostMin = totalMin * rate;
+      const estCostMax = totalMax * rate;
+      const totalLaborCost = totalMid * rate;
+      const recommendedBid = roundUp500(totalLaborCost * 1.15);
+      const activePrice = quote.priceOverride != null ? quote.priceOverride : recommendedBid;
+      const grossMarginPct = activePrice > 0 ? ((activePrice - totalLaborCost) / activePrice) * 100 : 0;
+
+      return { totalMin, totalMax, totalMid, estCostMin, estCostMax, totalLaborCost, recommendedBid, activePrice, grossMarginPct, phaseDetails, complexity, rate };
+    }
+
+    function calcTCO(quote, rateCard) {
+      const model = rateCard.llmPricing.find(m => m.id === quote.tco.llmModelId);
+      const hosting = rateCard.hostingTiers.find(t => t.id === quote.tco.hostingTierId);
+      const dailyInput = quote.tco.estimatedCallsPerDay * quote.tco.avgInputTokensPerCall;
+      const dailyOutput = quote.tco.estimatedCallsPerDay * quote.tco.avgOutputTokensPerCall;
+      const monthlyInputCost = model ? (dailyInput * 30 / 1000000) * model.inputCostPer1MTokens : 0;
+      const monthlyOutputCost = model ? (dailyOutput * 30 / 1000000) * model.outputCostPer1MTokens : 0;
+      const monthlyLLM = monthlyInputCost + monthlyOutputCost;
+      const support = rateCard.supportContract;
+
+      return {
+        monthlyLLM,
+        llmLow: monthlyLLM * 0.5,
+        llmMed: monthlyLLM,
+        llmHigh: monthlyLLM * 2,
+        hostingLow: hosting ? hosting.monthlyLow : 0,
+        hostingHigh: hosting ? hosting.monthlyHigh : 0,
+        hostingMid: hosting ? (hosting.monthlyLow + hosting.monthlyHigh) / 2 : 0,
+        isOnPrem: hosting ? hosting.id === 'on-prem' : false,
+        supportLow: quote.tco.supportContractIncluded ? support.monthlyLow : 0,
+        supportHigh: quote.tco.supportContractIncluded ? support.monthlyHigh : 0,
+        supportMid: quote.tco.supportContractIncluded ? (support.monthlyLow + support.monthlyHigh) / 2 : 0,
+        annual: {
+          llm: monthlyLLM * 12,
+          hostingLow: (hosting ? hosting.monthlyLow : 0) * 12,
+          hostingHigh: (hosting ? hosting.monthlyHigh : 0) * 12,
+          hostingMid: (hosting ? (hosting.monthlyLow + hosting.monthlyHigh) / 2 : 0) * 12,
+          supportMid: (quote.tco.supportContractIncluded ? (support.monthlyLow + support.monthlyHigh) / 2 : 0) * 12,
+        },
+        get totalAnnualLow() { return (this.llmLow * 12) + this.annual.hostingLow + (this.supportLow * 12); },
+        get totalAnnualHigh() { return (this.llmHigh * 12) + this.annual.hostingHigh + (this.supportHigh * 12); },
+        get totalAnnualMid() { return this.annual.llm + this.annual.hostingMid + this.annual.supportMid; },
+        model,
+        hosting,
+      };
+    }
+
+    // ─── Shared UI Components ──────────────────────────────────────────
+    function SectionCard({ title, children, className = '' }) {
+      return (
+        <div className={`bg-dq-surface rounded-xl border border-dq-border p-6 mb-6 ${className}`}>
+          {title && <h3 className="font-heading font-semibold text-lg text-white mb-4">{title}</h3>}
+          {children}
+        </div>
+      );
+    }
+
+    function InputField({ label, value, onChange, type = 'text', placeholder = '', className = '', mono = false, disabled = false }) {
+      return (
+        <div className={className}>
+          {label && <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1.5">{label}</label>}
+          <input
+            type={type}
+            value={value}
+            onChange={e => onChange(type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)}
+            placeholder={placeholder}
+            disabled={disabled}
+            className={`w-full bg-transparent border-b border-dq-border focus:border-dq-accent outline-none py-1.5 px-1 text-dq-text placeholder-dq-text-dim/50 transition-colors ${mono ? 'font-mono' : ''} ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+          />
+        </div>
+      );
+    }
+
+    function TextArea({ label, value, onChange, rows = 3, placeholder = '' }) {
+      return (
+        <div>
+          <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1.5">{label}</label>
+          <textarea
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            rows={rows}
+            placeholder={placeholder}
+            className="w-full bg-dq-surface-light border border-dq-border rounded-lg focus:border-dq-accent outline-none py-2 px-3 text-dq-text placeholder-dq-text-dim/50 resize-none transition-colors"
+          />
+        </div>
+      );
+    }
+
+    function Toggle({ label, checked, onChange }) {
+      return (
+        <label className="flex items-center gap-3 cursor-pointer select-none">
+          <div className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-dq-accent' : 'bg-dq-border'}`} onClick={() => onChange(!checked)}>
+            <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-[22px]' : 'translate-x-0.5'}`} />
+          </div>
+          <span className="text-sm font-heading text-dq-text-dim">{label}</span>
+        </label>
+      );
+    }
+
+    // ─── Settings Modal ────────────────────────────────────────────────
+    function SettingsModal({ settings, onSave, onClose }) {
+      const [s, setS] = useState({ ...settings });
+      const update = (k, v) => setS(prev => ({ ...prev, [k]: v }));
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 no-print" onClick={onClose}>
+          <div className="bg-dq-surface border border-dq-border rounded-2xl p-8 w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <h2 className="font-heading font-bold text-xl text-white mb-6">Settings</h2>
+            <div className="space-y-4">
+              <InputField label="Agency Name" value={s.agencyName} onChange={v => update('agencyName', v)} />
+              <InputField label="Preparer Name" value={s.preparerName} onChange={v => update('preparerName', v)} />
+              <InputField label="Anthropic API Key" value={s.apiKey} onChange={v => update('apiKey', v)} type="password" placeholder="sk-ant-..." />
+              <InputField label="PandaDoc API Key" value={s.pandadocApiKey} onChange={v => update('pandadocApiKey', v)} type="password" placeholder="API key from PandaDoc Settings..." />
+              <TextArea label="Default Client Message" value={s.defaultClientMessage} onChange={v => update('defaultClientMessage', v)} rows={3} />
+            </div>
+            <div className="flex justify-end gap-3 mt-6">
+              <button onClick={onClose} className="px-4 py-2 text-sm font-heading text-dq-text-dim hover:text-white transition-colors">Cancel</button>
+              <button onClick={() => { onSave(s); onClose(); }} className="px-5 py-2 text-sm font-heading font-semibold bg-dq-accent text-dq-bg rounded-lg hover:brightness-110 transition">Save</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Complexity Evaluator ──────────────────────────────────────────
+    function ComplexityEvaluator({ quote, onChange, apiKey }) {
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+      const active = getActiveComplexity(quote);
+
+      async function evaluate() {
+        if (!quote.requirements.trim()) { setError('Enter requirements first.'); return; }
+        if (!apiKey) { setError('Set your Anthropic API key in Settings.'); return; }
+        setLoading(true); setError(null);
+        try {
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true',
+            },
+            body: JSON.stringify({
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 1000,
+              system: COMPLEXITY_SYSTEM_PROMPT,
+              messages: [{ role: 'user', content: quote.requirements }],
+            }),
+          });
+          if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+          const data = await resp.json();
+          const text = data.content[0].text.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+          const result = JSON.parse(text);
+          onChange({
+            ...quote,
+            complexity: { ...quote.complexity, score: result.score, rationale: result.rationale, flags: result.flags || [] },
+          });
+        } catch (e) {
+          setError(e.message || 'Evaluation failed');
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      return (
+        <SectionCard title="Complexity Evaluator">
+          <div className="flex items-center gap-4 mb-4">
+            <button onClick={evaluate} disabled={loading} className="px-5 py-2 font-heading font-semibold text-sm bg-dq-accent text-dq-bg rounded-lg hover:brightness-110 transition disabled:opacity-50">
+              {loading ? 'Evaluating...' : 'Evaluate Complexity'}
+            </button>
+            <div className="flex items-center gap-2">
+              <span className="text-dq-text-dim text-sm font-heading">Active Multiplier:</span>
+              <span className="font-mono text-2xl font-bold text-dq-accent">{fmtNum(active, 2)}&times;</span>
+            </div>
+          </div>
+
+          {error && (
+            <div className="bg-dq-danger/10 border border-dq-danger/30 rounded-lg p-3 mb-4 text-sm text-dq-danger flex items-center gap-2">
+              <span>{error}</span>
+              <button onClick={evaluate} className="ml-auto underline text-xs">Retry</button>
+            </div>
+          )}
+
+          {quote.complexity.rationale && (
+            <div className="animate-slide-in bg-dq-surface-light border border-dq-border rounded-lg p-4 mb-4">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="font-mono text-lg text-dq-accent font-bold">{fmtNum(quote.complexity.score, 2)}&times;</span>
+                <span className="text-xs font-heading text-dq-text-dim uppercase">AI Score</span>
+              </div>
+              <p className="text-sm text-dq-text leading-relaxed mb-3">{quote.complexity.rationale}</p>
+              {quote.complexity.flags && quote.complexity.flags.length > 0 && (
+                <ul className="space-y-1">
+                  {quote.complexity.flags.map((f, i) => (
+                    <li key={i} className="text-xs text-dq-warning flex items-start gap-1.5">
+                      <span className="mt-0.5">&#9888;</span><span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {quote.complexity.score >= 2.5 && (
+                <div className="mt-3 bg-dq-danger/10 border border-dq-danger/30 rounded p-2 text-sm text-dq-danger font-semibold">
+                  This project may exceed a 30-day window. Consider phasing the scope.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4">
+            <InputField
+              label="Manual Override (0.5–2.5)"
+              value={quote.complexity.manualOverride ?? ''}
+              onChange={v => onChange({ ...quote, complexity: { ...quote.complexity, manualOverride: v === '' ? null : clamp(Number(v), 0.5, 2.5) } })}
+              type="number"
+              mono
+              placeholder="Leave blank to use AI score"
+            />
+            <InputField
+              label="Override Note"
+              value={quote.complexity.manualOverrideNote}
+              onChange={v => onChange({ ...quote, complexity: { ...quote.complexity, manualOverrideNote: v } })}
+              placeholder="Reason for override"
+            />
+          </div>
+        </SectionCard>
+      );
+    }
+
+    // ─── Phase Estimator ───────────────────────────────────────────────
+    function PhaseEstimator({ quote, onChange, rateCard }) {
+      const complexity = getActiveComplexity(quote);
+      const ccEnabled = quote.claudeCodeEnabled;
+      const ccEff = rateCard.laborRates.claudeCodeEfficiency;
+
+      function togglePhase(phaseId, field, value) {
+        const phases = quote.phases.map(p => p.phaseId === phaseId ? { ...p, [field]: value } : p);
+        onChange({ ...quote, phases });
+      }
+
+      return (
+        <SectionCard title="Phase Estimator">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs font-heading text-dq-text-dim uppercase tracking-wider border-b border-dq-border">
+                  <th className="text-left py-2 pr-3">Phase</th>
+                  <th className="text-right py-2 px-2 w-28">Hours (min–max)</th>
+                  <th className="text-right py-2 px-2 w-24">Adjust Hrs</th>
+                  <th className="text-center py-2 px-2 w-16">Include</th>
+                  <th className="text-left py-2 pl-2 w-48">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rateCard.phases.map(rp => {
+                  const qp = quote.phases.find(p => p.phaseId === rp.id);
+                  if (!qp) return null;
+                  const hrs = calcPhaseHoursRange(rp, ccEnabled, ccEff, complexity);
+                  return (
+                    <tr key={rp.id} className={`border-b border-dq-border/50 ${!qp.included ? 'opacity-40' : ''}`}>
+                      <td className="py-2.5 pr-3">
+                        <div className="font-heading font-medium text-white text-sm">{rp.name}</div>
+                        <div className="text-xs text-dq-text-dim">{rp.description}</div>
+                        {hrs.compressed && <span className="text-[10px] font-mono text-dq-accent">CC compressed</span>}
+                      </td>
+                      <td className="text-right py-2.5 px-2 font-mono text-dq-text whitespace-nowrap">
+                        {fmtNum(hrs.min)} – {fmtNum(hrs.max)}
+                      </td>
+                      <td className="text-right py-2.5 px-2">
+                        <input
+                          type="number"
+                          value={qp.hoursAdjustment || ''}
+                          onChange={e => togglePhase(rp.id, 'hoursAdjustment', e.target.value === '' ? 0 : Number(e.target.value))}
+                          placeholder="0"
+                          className="w-full bg-transparent border-b border-transparent hover:border-dq-border focus:border-dq-accent outline-none text-xs font-mono py-0.5 text-right text-dq-text-dim"
+                        />
+                      </td>
+                      <td className="text-center py-2.5 px-2">
+                        <input type="checkbox" checked={qp.included} onChange={e => togglePhase(rp.id, 'included', e.target.checked)} className="accent-dq-accent w-4 h-4" />
+                      </td>
+                      <td className="py-2.5 pl-2">
+                        <input
+                          type="text"
+                          value={qp.notes}
+                          onChange={e => togglePhase(rp.id, 'notes', e.target.value)}
+                          placeholder="—"
+                          className="w-full bg-transparent border-b border-transparent hover:border-dq-border focus:border-dq-accent outline-none text-xs py-0.5 text-dq-text-dim"
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </SectionCard>
+      );
+    }
+
+    // ─── Price Summary (sidebar) ───────────────────────────────────────
+    function PriceSummary({ quote, rateCard, onChange }) {
+      const summary = useMemo(() => calcQuoteSummary(quote, rateCard), [quote, rateCard]);
+      const atTarget = summary.grossMarginPct >= rateCard.targetMargin;
+      const [flashKey, setFlashKey] = useState(0);
+      const prevPrice = useRef(summary.activePrice);
+      useEffect(() => {
+        if (prevPrice.current !== summary.activePrice) { setFlashKey(k => k + 1); prevPrice.current = summary.activePrice; }
+      }, [summary.activePrice]);
+
+      return (
+        <div className="sticky top-20">
+          <div className="bg-dq-surface border border-dq-border rounded-xl p-5 space-y-4">
+            <h3 className="font-heading font-bold text-white text-lg">Price Summary</h3>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-dq-text-dim">Total Hours (min)</span><span className="font-mono">{fmtNum(summary.totalMin)}</span></div>
+              <div className="flex justify-between"><span className="text-dq-text-dim">Total Hours (max)</span><span className="font-mono">{fmtNum(summary.totalMax)}</span></div>
+              <div className="border-t border-dq-border/50 my-2" />
+              <div className="flex justify-between"><span className="text-dq-text-dim">Est. Cost (min)</span><span className="font-mono">{fmt(summary.estCostMin)}</span></div>
+              <div className="flex justify-between"><span className="text-dq-text-dim">Est. Cost (max)</span><span className="font-mono">{fmt(summary.estCostMax)}</span></div>
+              <div className="border-t border-dq-border/50 my-2" />
+              <div key={flashKey} className="flex justify-between items-center animate-flash rounded px-1 -mx-1">
+                <span className="text-dq-text-dim font-heading font-medium">Recommended Bid</span>
+                <span className="font-mono text-lg text-dq-accent font-bold">{fmt(summary.recommendedBid)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-dq-text-dim">Gross Margin</span>
+                <span className={`font-mono font-bold ${atTarget ? 'text-dq-success' : 'text-dq-danger'}`}>{fmtNum(summary.grossMarginPct)}%</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-dq-text-dim text-xs">Target: {rateCard.targetMargin}%</span>
+                <span className={`text-xs font-heading font-semibold px-2 py-0.5 rounded-full ${atTarget ? 'bg-dq-success/20 text-dq-success' : 'bg-dq-danger/20 text-dq-danger'}`}>
+                  {atTarget ? 'On Target' : 'Below Target'}
+                </span>
+              </div>
+            </div>
+            <div className="border-t border-dq-border/50 pt-3 space-y-3">
+              <InputField
+                label="Price Override"
+                value={quote.priceOverride ?? ''}
+                onChange={v => onChange({ ...quote, priceOverride: v === '' ? null : Number(v) })}
+                type="number"
+                mono
+                placeholder="Leave blank for recommended"
+              />
+              <InputField
+                label="Override Note"
+                value={quote.priceOverrideNote}
+                onChange={v => onChange({ ...quote, priceOverrideNote: v })}
+                placeholder="Reason"
+              />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── TCO Calculator ────────────────────────────────────────────────
+    function TCOCalculator({ quote, onChange, rateCard }) {
+      const tco = useMemo(() => calcTCO(quote, rateCard), [quote, rateCard]);
+      const updateTCO = (k, v) => onChange({ ...quote, tco: { ...quote.tco, [k]: v } });
+
+      return (
+        <SectionCard title="Total Cost of Ownership">
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            <div>
+              <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1.5">LLM Model</label>
+              <select
+                value={quote.tco.llmModelId}
+                onChange={e => updateTCO('llmModelId', e.target.value)}
+                className="w-full bg-dq-surface-light border border-dq-border rounded-lg py-2 px-3 text-sm text-dq-text outline-none focus:border-dq-accent"
+              >
+                {rateCard.llmPricing.map(m => <option key={m.id} value={m.id}>{m.name} ({m.provider})</option>)}
+              </select>
+            </div>
+            <InputField label="API Calls / Day" value={quote.tco.estimatedCallsPerDay} onChange={v => updateTCO('estimatedCallsPerDay', v)} type="number" mono />
+            <InputField label="Avg Input Tokens / Call" value={quote.tco.avgInputTokensPerCall} onChange={v => updateTCO('avgInputTokensPerCall', v)} type="number" mono />
+            <InputField label="Avg Output Tokens / Call" value={quote.tco.avgOutputTokensPerCall} onChange={v => updateTCO('avgOutputTokensPerCall', v)} type="number" mono />
+          </div>
+
+          <div className="bg-dq-surface-light rounded-lg p-4 mb-4">
+            <h4 className="font-heading text-sm text-dq-text-dim uppercase tracking-wider mb-3">Monthly LLM Cost</h4>
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div><div className="text-xs text-dq-text-dim mb-1">Low (0.5&times;)</div><div className="font-mono text-dq-text">{fmtDec(tco.llmLow)}</div></div>
+              <div><div className="text-xs text-dq-text-dim mb-1">Medium (1&times;)</div><div className="font-mono text-dq-accent font-semibold">{fmtDec(tco.llmMed)}</div></div>
+              <div><div className="text-xs text-dq-text-dim mb-1">High (2&times;)</div><div className="font-mono text-dq-text">{fmtDec(tco.llmHigh)}</div></div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1.5">Hosting Tier</label>
+              <select
+                value={quote.tco.hostingTierId}
+                onChange={e => updateTCO('hostingTierId', e.target.value)}
+                className="w-full bg-dq-surface-light border border-dq-border rounded-lg py-2 px-3 text-sm text-dq-text outline-none focus:border-dq-accent"
+              >
+                {rateCard.hostingTiers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            <div className="flex items-end">
+              {tco.isOnPrem ? (
+                <div className="text-sm text-dq-text-dim italic">On-premises — labor estimate only</div>
+              ) : (
+                <div className="font-mono text-sm">{fmt(tco.hostingLow)} – {fmt(tco.hostingHigh)}<span className="text-dq-text-dim text-xs"> /mo</span></div>
+              )}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <Toggle label="Include Support Contract" checked={quote.tco.supportContractIncluded} onChange={v => updateTCO('supportContractIncluded', v)} />
+            {quote.tco.supportContractIncluded && (
+              <div className="mt-2 font-mono text-sm text-dq-text">{fmt(tco.supportLow)} – {fmt(tco.supportHigh)}<span className="text-dq-text-dim text-xs"> /mo</span></div>
+            )}
+          </div>
+
+          <div className="bg-dq-accent/5 border border-dq-accent/20 rounded-lg p-4">
+            <h4 className="font-heading font-semibold text-dq-accent text-sm mb-2">12-Month Total Cost of Ownership</h4>
+            <div className="font-mono text-xl text-white">{fmt(tco.totalAnnualLow)} – {fmt(tco.totalAnnualHigh)}</div>
+            <div className="text-xs text-dq-text-dim mt-1">Mid estimate: {fmt(tco.totalAnnualMid)}</div>
+          </div>
+        </SectionCard>
+      );
+    }
+
+    // ─── Quote Builder ─────────────────────────────────────────────────
+    function QuoteBuilder({ quote, setQuote, rateCard, settings, quoteList, onSave, onNew, onLoad, onDelete }) {
+      return (
+        <div className="flex gap-6">
+          <div className="flex-1 min-w-0">
+            {/* Project Details */}
+            <SectionCard title="Project Details">
+              <div className="grid grid-cols-3 gap-4 mb-4">
+                <InputField label="Project Name" value={quote.projectName} onChange={v => setQuote({ ...quote, projectName: v })} />
+                <InputField label="Client Name" value={quote.clientName} onChange={v => setQuote({ ...quote, clientName: v })} />
+                <InputField label="Client Contact Email" value={quote.clientContact} onChange={v => setQuote({ ...quote, clientContact: v })} />
+              </div>
+              <div className="space-y-4">
+                <TextArea label="Project Summary (shown in proposal)" value={quote.projectSummary} onChange={v => setQuote({ ...quote, projectSummary: v })} rows={3} placeholder="Describe the project for the client..." />
+                <TextArea label="Requirements (for complexity evaluation only)" value={quote.requirements} onChange={v => setQuote({ ...quote, requirements: v })} rows={5} placeholder="Paste detailed requirements here..." />
+                <TextArea label="Deliverables (one per line, shown in proposal)" value={quote.deliverables} onChange={v => setQuote({ ...quote, deliverables: v })} rows={4} placeholder="Web application with admin dashboard&#10;REST API with documentation&#10;User training session&#10;..." />
+              </div>
+              <div className="mt-4">
+                <Toggle label="Claude Code Enabled" checked={quote.claudeCodeEnabled} onChange={v => setQuote({ ...quote, claudeCodeEnabled: v })} />
+              </div>
+            </SectionCard>
+
+            <ComplexityEvaluator quote={quote} onChange={setQuote} apiKey={settings.apiKey} />
+            <PhaseEstimator quote={quote} onChange={setQuote} rateCard={rateCard} />
+            <TCOCalculator quote={quote} onChange={setQuote} rateCard={rateCard} />
+
+            {/* Actions */}
+            <div className="flex items-center gap-3 mb-6">
+              <button onClick={onSave} className="px-5 py-2.5 font-heading font-semibold text-sm bg-dq-accent text-dq-bg rounded-lg hover:brightness-110 transition">Save Quote</button>
+              <button onClick={onNew} className="px-5 py-2.5 font-heading font-semibold text-sm border border-dq-border text-dq-text rounded-lg hover:border-dq-accent hover:text-dq-accent transition">New Quote</button>
+              {quoteList.length > 0 && (
+                <select
+                  onChange={e => { if (e.target.value) onLoad(e.target.value); e.target.value = ''; }}
+                  defaultValue=""
+                  className="px-3 py-2.5 font-heading text-sm bg-dq-surface border border-dq-border rounded-lg text-dq-text outline-none focus:border-dq-accent"
+                >
+                  <option value="" disabled>Load Quote...</option>
+                  {quoteList.map(q => <option key={q.id} value={q.id}>{q.projectName || 'Untitled'} — {new Date(q.updatedAt).toLocaleDateString()}</option>)}
+                </select>
+              )}
+              {quote.id && quote.projectName && (
+                <button onClick={onDelete} className="px-4 py-2.5 font-heading text-sm text-dq-danger hover:bg-dq-danger/10 rounded-lg transition">Delete</button>
+              )}
+            </div>
+          </div>
+
+          <div className="w-80 shrink-0">
+            <PriceSummary quote={quote} rateCard={rateCard} onChange={setQuote} />
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Rate Card Tab ─────────────────────────────────────────────────
+    function RateCardTab({ rateCard, setRateCard }) {
+      function updateLabor(key, val) {
+        setRateCard(rc => ({ ...rc, laborRates: { ...rc.laborRates, [key]: val }, lastUpdated: new Date().toISOString() }));
+      }
+      function updatePhase(idx, key, val) {
+        setRateCard(rc => {
+          const phases = [...rc.phases];
+          phases[idx] = { ...phases[idx], [key]: val };
+          return { ...rc, phases, lastUpdated: new Date().toISOString() };
+        });
+      }
+      function addPhase() {
+        setRateCard(rc => ({
+          ...rc,
+          phases: [...rc.phases, { id: 'phase-' + uuid().slice(0, 8), name: 'New Phase', description: '', minHours: 1, maxHours: 4, includeInProposal: true, claudeCodeApplies: false }],
+          lastUpdated: new Date().toISOString(),
+        }));
+      }
+      function deletePhase(idx) {
+        setRateCard(rc => ({ ...rc, phases: rc.phases.filter((_, i) => i !== idx), lastUpdated: new Date().toISOString() }));
+      }
+      function updateLLM(idx, key, val) {
+        setRateCard(rc => {
+          const llm = [...rc.llmPricing];
+          llm[idx] = { ...llm[idx], [key]: val };
+          return { ...rc, llmPricing: llm, lastUpdated: new Date().toISOString() };
+        });
+      }
+      function addLLM() {
+        setRateCard(rc => ({
+          ...rc,
+          llmPricing: [...rc.llmPricing, { id: 'model-' + uuid().slice(0, 8), name: 'New Model', provider: '', inputCostPer1MTokens: 0, outputCostPer1MTokens: 0 }],
+          lastUpdated: new Date().toISOString(),
+        }));
+      }
+      function deleteLLM(idx) {
+        setRateCard(rc => ({ ...rc, llmPricing: rc.llmPricing.filter((_, i) => i !== idx), lastUpdated: new Date().toISOString() }));
+      }
+      function updateHosting(idx, key, val) {
+        setRateCard(rc => {
+          const h = [...rc.hostingTiers];
+          h[idx] = { ...h[idx], [key]: val };
+          return { ...rc, hostingTiers: h, lastUpdated: new Date().toISOString() };
+        });
+      }
+      function addHosting() {
+        setRateCard(rc => ({
+          ...rc,
+          hostingTiers: [...rc.hostingTiers, { id: 'tier-' + uuid().slice(0, 8), name: 'New Tier', description: '', monthlyLow: 0, monthlyHigh: 0 }],
+          lastUpdated: new Date().toISOString(),
+        }));
+      }
+      function deleteHosting(idx) {
+        setRateCard(rc => ({ ...rc, hostingTiers: rc.hostingTiers.filter((_, i) => i !== idx), lastUpdated: new Date().toISOString() }));
+      }
+      function updateSupport(key, val) {
+        setRateCard(rc => ({ ...rc, supportContract: { ...rc.supportContract, [key]: val }, lastUpdated: new Date().toISOString() }));
+      }
+
+      const cellInput = "bg-transparent border-b border-transparent hover:border-dq-border focus:border-dq-accent outline-none py-1 px-1 transition-colors text-sm";
+
+      return (
+        <div>
+          <div className="text-xs text-dq-text-dim mb-6 font-mono">Last updated: {new Date(rateCard.lastUpdated).toLocaleString()}</div>
+
+          {/* Labor Rates */}
+          <SectionCard title="Labor Rates">
+            <div className="grid grid-cols-3 gap-6">
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Hourly Rate ($)</label>
+                <input type="number" value={rateCard.laborRates.hourlyRate} onChange={e => updateLabor('hourlyRate', Number(e.target.value))} className={`${cellInput} font-mono w-full`} />
+              </div>
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Blended Rate ($)</label>
+                <input type="number" value={rateCard.laborRates.blendedRate} onChange={e => updateLabor('blendedRate', Number(e.target.value))} className={`${cellInput} font-mono w-full`} />
+              </div>
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Claude Code Efficiency (%)</label>
+                <div className="flex items-center gap-2">
+                  <input type="number" value={Math.round(rateCard.laborRates.claudeCodeEfficiency * 100)} onChange={e => updateLabor('claudeCodeEfficiency', Number(e.target.value) / 100)} className={`${cellInput} font-mono w-full`} min="0" max="100" />
+                  <span className="text-dq-text-dim text-sm">%</span>
+                </div>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Phase Hour Ranges */}
+          <SectionCard title="Phase Hour Ranges">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs font-heading text-dq-text-dim uppercase tracking-wider border-b border-dq-border">
+                    <th className="text-left py-2 pr-2">Phase Name</th>
+                    <th className="text-left py-2 px-2">Description</th>
+                    <th className="text-right py-2 px-2 w-20">Min Hrs</th>
+                    <th className="text-right py-2 px-2 w-20">Max Hrs</th>
+                    <th className="text-center py-2 px-2 w-16">CC</th>
+                    <th className="text-center py-2 px-2 w-20">Proposal</th>
+                    <th className="text-center py-2 px-2 w-12"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rateCard.phases.map((p, i) => (
+                    <tr key={p.id} className="border-b border-dq-border/30">
+                      <td className="py-1 pr-2"><input type="text" value={p.name} onChange={e => updatePhase(i, 'name', e.target.value)} className={`${cellInput} w-full font-heading`} /></td>
+                      <td className="py-1 px-2"><input type="text" value={p.description} onChange={e => updatePhase(i, 'description', e.target.value)} className={`${cellInput} w-full text-dq-text-dim`} /></td>
+                      <td className="py-1 px-2"><input type="number" value={p.minHours} onChange={e => updatePhase(i, 'minHours', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} /></td>
+                      <td className="py-1 px-2"><input type="number" value={p.maxHours} onChange={e => updatePhase(i, 'maxHours', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} /></td>
+                      <td className="py-1 px-2 text-center"><input type="checkbox" checked={p.claudeCodeApplies} onChange={e => updatePhase(i, 'claudeCodeApplies', e.target.checked)} className="accent-dq-accent w-4 h-4" /></td>
+                      <td className="py-1 px-2 text-center"><input type="checkbox" checked={p.includeInProposal} onChange={e => updatePhase(i, 'includeInProposal', e.target.checked)} className="accent-dq-accent w-4 h-4" /></td>
+                      <td className="py-1 px-2 text-center">
+                        <button onClick={() => deletePhase(i)} className="text-dq-text-dim hover:text-dq-danger transition text-lg leading-none">&times;</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button onClick={addPhase} className="mt-3 px-4 py-1.5 text-xs font-heading border border-dq-border text-dq-text-dim rounded-lg hover:border-dq-accent hover:text-dq-accent transition">+ Add Phase</button>
+          </SectionCard>
+
+          {/* LLM Pricing */}
+          <SectionCard title="LLM Pricing">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs font-heading text-dq-text-dim uppercase tracking-wider border-b border-dq-border">
+                    <th className="text-left py-2 pr-2">Model Name</th>
+                    <th className="text-left py-2 px-2">Provider</th>
+                    <th className="text-right py-2 px-2 w-32">Input $/1M tokens</th>
+                    <th className="text-right py-2 px-2 w-32">Output $/1M tokens</th>
+                    <th className="text-center py-2 px-2 w-12"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rateCard.llmPricing.map((m, i) => (
+                    <tr key={m.id} className="border-b border-dq-border/30">
+                      <td className="py-1 pr-2"><input type="text" value={m.name} onChange={e => updateLLM(i, 'name', e.target.value)} className={`${cellInput} w-full`} /></td>
+                      <td className="py-1 px-2"><input type="text" value={m.provider} onChange={e => updateLLM(i, 'provider', e.target.value)} className={`${cellInput} w-full text-dq-text-dim`} /></td>
+                      <td className="py-1 px-2"><input type="number" step="0.01" value={m.inputCostPer1MTokens} onChange={e => updateLLM(i, 'inputCostPer1MTokens', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} /></td>
+                      <td className="py-1 px-2"><input type="number" step="0.01" value={m.outputCostPer1MTokens} onChange={e => updateLLM(i, 'outputCostPer1MTokens', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} /></td>
+                      <td className="py-1 px-2 text-center">
+                        <button onClick={() => deleteLLM(i)} className="text-dq-text-dim hover:text-dq-danger transition text-lg leading-none">&times;</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button onClick={addLLM} className="mt-3 px-4 py-1.5 text-xs font-heading border border-dq-border text-dq-text-dim rounded-lg hover:border-dq-accent hover:text-dq-accent transition">+ Add Model</button>
+          </SectionCard>
+
+          {/* Hosting Tiers */}
+          <SectionCard title="Hosting Tiers">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs font-heading text-dq-text-dim uppercase tracking-wider border-b border-dq-border">
+                    <th className="text-left py-2 pr-2">Tier Name</th>
+                    <th className="text-left py-2 px-2">Description</th>
+                    <th className="text-right py-2 px-2 w-28">Monthly Low ($)</th>
+                    <th className="text-right py-2 px-2 w-28">Monthly High ($)</th>
+                    <th className="text-center py-2 px-2 w-12"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rateCard.hostingTiers.map((t, i) => {
+                    const isOnPrem = t.id === 'on-prem';
+                    return (
+                      <tr key={t.id} className="border-b border-dq-border/30">
+                        <td className="py-1 pr-2"><input type="text" value={t.name} onChange={e => updateHosting(i, 'name', e.target.value)} className={`${cellInput} w-full`} /></td>
+                        <td className="py-1 px-2"><input type="text" value={t.description} onChange={e => updateHosting(i, 'description', e.target.value)} className={`${cellInput} w-full text-dq-text-dim`} /></td>
+                        <td className="py-1 px-2">
+                          {isOnPrem ? <span className="text-xs text-dq-text-dim italic">Labor estimate</span> :
+                            <input type="number" value={t.monthlyLow} onChange={e => updateHosting(i, 'monthlyLow', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} />}
+                        </td>
+                        <td className="py-1 px-2">
+                          {isOnPrem ? <span className="text-xs text-dq-text-dim italic">—</span> :
+                            <input type="number" value={t.monthlyHigh} onChange={e => updateHosting(i, 'monthlyHigh', Number(e.target.value))} className={`${cellInput} font-mono w-full text-right`} />}
+                        </td>
+                        <td className="py-1 px-2 text-center">
+                          <button onClick={() => deleteHosting(i)} className="text-dq-text-dim hover:text-dq-danger transition text-lg leading-none">&times;</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <button onClick={addHosting} className="mt-3 px-4 py-1.5 text-xs font-heading border border-dq-border text-dq-text-dim rounded-lg hover:border-dq-accent hover:text-dq-accent transition">+ Add Tier</button>
+          </SectionCard>
+
+          {/* Support Contract */}
+          <SectionCard title="Support Contract">
+            <div className="grid grid-cols-3 gap-6">
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Monthly Low ($)</label>
+                <input type="number" value={rateCard.supportContract.monthlyLow} onChange={e => updateSupport('monthlyLow', Number(e.target.value))} className={`${cellInput} font-mono w-full`} />
+              </div>
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Monthly High ($)</label>
+                <input type="number" value={rateCard.supportContract.monthlyHigh} onChange={e => updateSupport('monthlyHigh', Number(e.target.value))} className={`${cellInput} font-mono w-full`} />
+              </div>
+              <div>
+                <label className="block text-xs font-heading text-dq-text-dim uppercase tracking-wider mb-1">Description</label>
+                <input type="text" value={rateCard.supportContract.description} onChange={e => updateSupport('description', e.target.value)} className={`${cellInput} w-full`} />
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Target Margin */}
+          <SectionCard title="Target Margin">
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                value={rateCard.targetMargin}
+                onChange={e => setRateCard(rc => ({ ...rc, targetMargin: Number(e.target.value), lastUpdated: new Date().toISOString() }))}
+                className="bg-transparent border-b border-dq-border focus:border-dq-accent outline-none py-1 px-1 font-mono text-lg w-24 text-right"
+              />
+              <span className="text-dq-text-dim font-heading">%</span>
+            </div>
+          </SectionCard>
+        </div>
+      );
+    }
+
+    // ─── PandaDoc Export ─────────────────────────────────────────────
+    function PandaDocExport({ quote, rateCard, settings }) {
+      const [templates, setTemplates] = useState([]);
+      const [selectedTemplate, setSelectedTemplate] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [fetchingTemplates, setFetchingTemplates] = useState(false);
+      const [status, setStatus] = useState(null);
+
+      const pandaKey = settings.pandadocApiKey;
+
+      function fetchTemplates() {
+        if (!pandaKey) { setStatus({ type: 'error', msg: 'Set your PandaDoc API key in Settings.' }); return; }
+        setFetchingTemplates(true); setStatus(null);
+        fetch('https://api.pandadoc.com/public/v1/templates', {
+          headers: { 'Authorization': `API-Key ${pandaKey}` },
+        })
+          .then(r => { if (!r.ok) throw new Error(`PandaDoc API error: ${r.status}`); return r.json(); })
+          .then(data => {
+            const list = data.results || data;
+            setTemplates(Array.isArray(list) ? list : []);
+            if (list.length === 0) setStatus({ type: 'warn', msg: 'No templates found in your PandaDoc account.' });
+          })
+          .catch(e => setStatus({ type: 'error', msg: e.message }))
+          .finally(() => setFetchingTemplates(false));
+      }
+
+      useEffect(() => { if (pandaKey) fetchTemplates(); }, [pandaKey]);
+
+      const summary = useMemo(() => calcQuoteSummary(quote, rateCard), [quote, rateCard]);
+      const tco = useMemo(() => calcTCO(quote, rateCard), [quote, rateCard]);
+
+      const includedPhases = rateCard.phases.filter(rp => {
+        const qp = quote.phases.find(p => p.phaseId === rp.id);
+        return qp && qp.included && rp.includeInProposal;
+      });
+
+      function exportToPandaDoc() {
+        if (!pandaKey) { setStatus({ type: 'error', msg: 'Set your PandaDoc API key in Settings.' }); return; }
+        if (!selectedTemplate) { setStatus({ type: 'error', msg: 'Select a template.' }); return; }
+        setLoading(true); setStatus(null);
+
+        const scopeOfWork = includedPhases.map((rp, i) => `${i + 1}. ${rp.name} — ${rp.description}`).join('\n');
+        const deliverablesList = (quote.deliverables || '').trim().split('\n').filter(l => l.trim()).map(l => `• ${l.trim()}`).join('\n');
+
+        const tokens = [
+          { name: 'project_name', value: quote.projectName || 'Untitled Project' },
+          { name: 'client_name', value: quote.clientName || '' },
+          { name: 'client_contact', value: quote.clientContact || '' },
+          { name: 'agency_name', value: settings.agencyName || '' },
+          { name: 'preparer_name', value: settings.preparerName || '' },
+          { name: 'date', value: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) },
+          { name: 'project_summary', value: quote.projectSummary || '' },
+          { name: 'scope_of_work', value: scopeOfWork },
+          { name: 'deliverables', value: deliverablesList },
+          { name: 'investment', value: fmt(summary.activePrice) },
+          { name: 'total_hours_min', value: fmtNum(summary.totalMin) },
+          { name: 'total_hours_max', value: fmtNum(summary.totalMax) },
+          { name: 'monthly_llm_cost', value: `${fmtDec(tco.llmLow)} – ${fmtDec(tco.llmHigh)}` },
+          { name: 'monthly_hosting', value: tco.isOnPrem ? 'On-premises' : `${fmt(tco.hostingLow)} – ${fmt(tco.hostingHigh)}` },
+          { name: 'annual_tco', value: `${fmt(tco.totalAnnualLow)} – ${fmt(tco.totalAnnualHigh)}` },
+          { name: 'next_steps', value: settings.defaultClientMessage || '' },
+        ];
+
+        const body = {
+          name: `${quote.projectName || 'Quote'} — Proposal`,
+          template_uuid: selectedTemplate,
+          tokens,
+        };
+
+        if (quote.clientContact) {
+          body.recipients = [{ email: quote.clientContact, first_name: quote.clientName || '', role: 'Client' }];
+        }
+
+        fetch('https://api.pandadoc.com/public/v1/documents', {
+          method: 'POST',
+          headers: { 'Authorization': `API-Key ${pandaKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+          .then(r => { if (!r.ok) return r.json().then(d => { const msg = typeof d === 'string' ? d : (typeof d.detail === 'string' ? d.detail : typeof d.message === 'string' ? d.message : JSON.stringify(d)); throw new Error(msg); }); return r.json(); })
+          .then(data => {
+            setStatus({ type: 'success', msg: `Document created! ID: ${data.id}`, url: `https://app.pandadoc.com/a/#/documents/${data.id}` });
+          })
+          .catch(e => setStatus({ type: 'error', msg: e.message }))
+          .finally(() => setLoading(false));
+      }
+
+      if (!pandaKey) return null;
+
+      return (
+        <div className="no-print flex items-center gap-3 flex-wrap">
+          <select
+            value={selectedTemplate}
+            onChange={e => setSelectedTemplate(e.target.value)}
+            className="px-3 py-2.5 font-heading text-sm bg-dq-surface border border-dq-border rounded-lg text-dq-text outline-none focus:border-dq-accent"
+          >
+            <option value="" disabled>{fetchingTemplates ? 'Loading templates...' : 'Select PandaDoc Template...'}</option>
+            {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <button onClick={fetchTemplates} disabled={fetchingTemplates} className="px-3 py-2.5 font-heading text-sm border border-dq-border text-dq-text-dim rounded-lg hover:border-dq-accent hover:text-dq-accent transition disabled:opacity-50" title="Refresh templates">
+            &#8635;
+          </button>
+          <button onClick={exportToPandaDoc} disabled={loading || !selectedTemplate} className="px-5 py-2.5 font-heading font-semibold text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-500 transition disabled:opacity-50">
+            {loading ? 'Sending...' : 'Send to PandaDoc'}
+          </button>
+          {status && (
+            <span className={`text-sm font-heading ${status.type === 'success' ? 'text-dq-success' : status.type === 'warn' ? 'text-dq-warning' : 'text-dq-danger'}`}>
+              {status.msg}
+              {status.url && <a href={status.url} target="_blank" rel="noopener noreferrer" className="ml-2 underline">Open in PandaDoc</a>}
+            </span>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Proposal View ─────────────────────────────────────────────────
+    function ProposalView({ quote, rateCard, settings }) {
+      const summary = useMemo(() => calcQuoteSummary(quote, rateCard), [quote, rateCard]);
+      const tco = useMemo(() => calcTCO(quote, rateCard), [quote, rateCard]);
+      const includedPhases = rateCard.phases.filter(rp => {
+        const qp = quote.phases.find(p => p.phaseId === rp.id);
+        return qp && qp.included && rp.includeInProposal;
+      });
+
+      return (
+        <div className="print-proposal max-w-3xl mx-auto">
+          <div className="no-print mb-4 flex items-center justify-between gap-4">
+            <PandaDocExport quote={quote} rateCard={rateCard} settings={settings} />
+            <button onClick={() => window.print()} className="px-5 py-2.5 font-heading font-semibold text-sm bg-dq-accent text-dq-bg rounded-lg hover:brightness-110 transition shrink-0">
+              Print / Export
+            </button>
+          </div>
+
+          <div className="bg-dq-surface border border-dq-border rounded-2xl p-10 space-y-8">
+            {/* Header */}
+            <section className="border-b border-dq-border pb-6">
+              <h1 className="font-heading font-bold text-3xl text-white mb-2">{quote.projectName || 'Project Proposal'}</h1>
+              <div className="grid grid-cols-2 gap-4 text-sm text-dq-text-dim">
+                <div>
+                  <div>Prepared for: <span className="text-dq-text">{quote.clientName || '—'}</span></div>
+                  <div>Contact: <span className="text-dq-text">{quote.clientContact || '—'}</span></div>
+                </div>
+                <div className="text-right">
+                  <div>Prepared by: <span className="text-dq-text">{settings.agencyName}</span></div>
+                  {settings.preparerName && <div><span className="text-dq-text">{settings.preparerName}</span></div>}
+                  <div>Date: <span className="text-dq-text">{new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>
+                </div>
+              </div>
+            </section>
+
+            {/* Project Overview */}
+            {quote.projectSummary && (
+              <section>
+                <h2 className="font-heading font-semibold text-xl text-white mb-3">Project Overview</h2>
+                <p className="text-dq-text leading-relaxed whitespace-pre-wrap">{quote.projectSummary}</p>
+              </section>
+            )}
+
+            {/* Scope of Work */}
+            <section>
+              <h2 className="font-heading font-semibold text-xl text-white mb-3">Scope of Work</h2>
+              <div className="space-y-3">
+                {includedPhases.map((rp, i) => (
+                  <div key={rp.id} className="flex gap-3">
+                    <span className="font-mono text-dq-accent text-sm mt-0.5">{String(i + 1).padStart(2, '0')}</span>
+                    <div>
+                      <div className="font-heading font-medium text-white">{rp.name}</div>
+                      <div className="text-sm text-dq-text-dim">{rp.description}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Deliverables */}
+            {quote.deliverables && quote.deliverables.trim() && (
+              <section>
+                <h2 className="font-heading font-semibold text-xl text-white mb-3">Deliverables</h2>
+                <ul className="space-y-2 text-sm text-dq-text">
+                  {quote.deliverables.trim().split('\n').filter(l => l.trim()).map((line, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-dq-accent mt-0.5">&#9654;</span>
+                      <span>{line.trim()}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {/* Investment */}
+            <section className="bg-dq-surface-light rounded-xl p-6">
+              <h2 className="font-heading font-semibold text-xl text-white mb-3">Investment</h2>
+              <div className="font-mono text-4xl text-dq-accent font-bold accent-text">{fmt(summary.activePrice)}</div>
+              <div className="text-sm text-dq-text-dim mt-1">Fixed project price</div>
+            </section>
+
+            {/* What's Included */}
+            <section>
+              <h2 className="font-heading font-semibold text-xl text-white mb-3">What's Included</h2>
+              <ul className="space-y-2 text-sm text-dq-text">
+                <li className="flex gap-2"><span className="text-dq-accent">&#10003;</span>14-day change window: Up to 2 minor changes post-acceptance (UI only, no logic changes, under 2 hours each)</li>
+                {!quote.tco.supportContractIncluded && (
+                  <li className="flex gap-2"><span className="text-dq-accent">&#10003;</span>30-day break-fix coverage: Bug fixes within original spec (excludes new features)</li>
+                )}
+                {quote.tco.supportContractIncluded && (
+                  <li className="flex gap-2"><span className="text-dq-accent">&#10003;</span>Ongoing support contract: {rateCard.supportContract.description}</li>
+                )}
+              </ul>
+            </section>
+
+            {/* Monthly Cost of Ownership */}
+            <section>
+              <h2 className="font-heading font-semibold text-xl text-white mb-3">Monthly Cost of Ownership</h2>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between py-2 border-b border-dq-border/30">
+                  <span className="text-dq-text-dim">LLM API Costs</span>
+                  <span className="font-mono">{fmtDec(tco.llmLow)} – {fmtDec(tco.llmHigh)}<span className="text-dq-text-dim"> /mo</span></span>
+                </div>
+                {!tco.isOnPrem && (
+                  <div className="flex justify-between py-2 border-b border-dq-border/30">
+                    <span className="text-dq-text-dim">Hosting</span>
+                    <span className="font-mono">{fmt(tco.hostingLow)} – {fmt(tco.hostingHigh)}<span className="text-dq-text-dim"> /mo</span></span>
+                  </div>
+                )}
+                {tco.isOnPrem && (
+                  <div className="flex justify-between py-2 border-b border-dq-border/30">
+                    <span className="text-dq-text-dim">Hosting</span>
+                    <span className="text-dq-text-dim italic">On-premises (client-managed)</span>
+                  </div>
+                )}
+                {quote.tco.supportContractIncluded && (
+                  <div className="flex justify-between py-2 border-b border-dq-border/30">
+                    <span className="text-dq-text-dim">Support Contract</span>
+                    <span className="font-mono">{fmt(tco.supportLow)} – {fmt(tco.supportHigh)}<span className="text-dq-text-dim"> /mo</span></span>
+                  </div>
+                )}
+                <div className="flex justify-between py-3 font-heading font-semibold">
+                  <span className="text-white">12-Month Total Cost of Ownership</span>
+                  <span className="font-mono text-dq-accent accent-text">{fmt(tco.totalAnnualLow)} – {fmt(tco.totalAnnualHigh)}</span>
+                </div>
+              </div>
+            </section>
+
+            {/* Next Steps */}
+            <section className="border-t border-dq-border pt-6">
+              <h2 className="font-heading font-semibold text-xl text-white mb-3">Next Steps</h2>
+              <p className="text-dq-text">{settings.defaultClientMessage}</p>
+            </section>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Internal View ─────────────────────────────────────────────────
+    function InternalView({ quote, rateCard }) {
+      const summary = useMemo(() => calcQuoteSummary(quote, rateCard), [quote, rateCard]);
+      const tco = useMemo(() => calcTCO(quote, rateCard), [quote, rateCard]);
+      const atTarget = summary.grossMarginPct >= rateCard.targetMargin;
+
+      return (
+        <div className="max-w-5xl mx-auto space-y-6">
+          {/* Quote Summary */}
+          <SectionCard title="Quote Summary">
+            <div className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm">
+              <div><span className="text-dq-text-dim">Project:</span> <span className="text-white">{quote.projectName || '—'}</span></div>
+              <div><span className="text-dq-text-dim">Client:</span> <span className="text-white">{quote.clientName || '—'}</span></div>
+              <div><span className="text-dq-text-dim">Contact:</span> <span className="text-white">{quote.clientContact || '—'}</span></div>
+              <div><span className="text-dq-text-dim">Status:</span> <span className="text-white capitalize">{quote.status}</span></div>
+              <div><span className="text-dq-text-dim">Claude Code:</span> <span className={quote.claudeCodeEnabled ? 'text-dq-accent' : 'text-dq-text-dim'}>{quote.claudeCodeEnabled ? 'Enabled' : 'Disabled'}</span></div>
+              <div><span className="text-dq-text-dim">Complexity Score:</span> <span className="font-mono text-dq-accent">{fmtNum(summary.complexity, 2)}&times;</span>
+                {quote.complexity.manualOverride != null && <span className="text-xs text-dq-warning ml-2">(override)</span>}
+              </div>
+            </div>
+            {quote.complexity.rationale && (
+              <div className="mt-4 bg-dq-surface-light rounded-lg p-3">
+                <div className="text-xs font-heading text-dq-text-dim uppercase mb-1">AI Rationale</div>
+                <p className="text-sm text-dq-text">{quote.complexity.rationale}</p>
+                {quote.complexity.flags && quote.complexity.flags.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {quote.complexity.flags.map((f, i) => <span key={i} className="text-xs bg-dq-warning/10 text-dq-warning px-2 py-0.5 rounded">{f}</span>)}
+                  </div>
+                )}
+              </div>
+            )}
+            {quote.complexity.manualOverrideNote && (
+              <div className="mt-2 text-xs text-dq-text-dim">Override note: {quote.complexity.manualOverrideNote}</div>
+            )}
+          </SectionCard>
+
+          {/* Phase Breakdown */}
+          <SectionCard title="Phase Breakdown">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs font-heading text-dq-text-dim uppercase tracking-wider border-b border-dq-border">
+                    <th className="text-left py-2 pr-2">Phase</th>
+                    <th className="text-right py-2 px-2">Base Hours</th>
+                    <th className="text-right py-2 px-2">Compressed</th>
+                    <th className="text-right py-2 px-2">Adjusted</th>
+                    <th className="text-right py-2 pl-2">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.phaseDetails.map(pd => (
+                    <tr key={pd.phaseId} className="border-b border-dq-border/30">
+                      <td className="py-2 pr-2">
+                        <div className="font-heading text-white">{pd.rateDef.name}</div>
+                        {pd.hours.compressed && <span className="text-[10px] font-mono text-dq-accent">CC</span>}
+                      </td>
+                      <td className="py-2 px-2 font-mono text-right text-dq-text-dim">{fmtNum((pd.rateDef.minHours + pd.rateDef.maxHours) / 2)}</td>
+                      <td className="py-2 px-2 font-mono text-right">
+                        {pd.hours.compressed
+                          ? <span className="text-dq-accent">{fmtNum((pd.rateDef.minHours + pd.rateDef.maxHours) / 2 * (1 - rateCard.laborRates.claudeCodeEfficiency))}</span>
+                          : <span className="text-dq-text-dim">—</span>}
+                      </td>
+                      <td className="py-2 px-2 font-mono text-right text-white">{fmtNum(pd.hours.mid)}</td>
+                      <td className="py-2 pl-2 font-mono text-right text-white">{fmt(pd.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-dq-border font-heading font-semibold">
+                    <td className="py-3 text-white">Total</td>
+                    <td></td>
+                    <td></td>
+                    <td className="py-3 font-mono text-right text-white">{fmtNum(summary.totalMid)}</td>
+                    <td className="py-3 font-mono text-right text-white">{fmt(summary.totalLaborCost)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </SectionCard>
+
+          {/* Margin Analysis */}
+          <SectionCard title="Margin Analysis">
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between"><span className="text-dq-text-dim">Labor Cost (midpoint)</span><span className="font-mono">{fmt(summary.totalLaborCost)}</span></div>
+                <div className="flex justify-between"><span className="text-dq-text-dim">Recommended Bid</span><span className="font-mono">{fmt(summary.recommendedBid)}</span></div>
+                {quote.priceOverride != null && (
+                  <div className="flex justify-between"><span className="text-dq-text-dim">Price Override</span><span className="font-mono text-dq-warning">{fmt(quote.priceOverride)}</span></div>
+                )}
+                <div className="flex justify-between"><span className="text-dq-text-dim">Quoted Price</span><span className="font-mono text-dq-accent font-bold">{fmt(summary.activePrice)}</span></div>
+                <div className="border-t border-dq-border/50 pt-3 flex justify-between">
+                  <span className="text-dq-text-dim">Gross Margin ($)</span>
+                  <span className="font-mono">{fmt(summary.activePrice - summary.totalLaborCost)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-dq-text-dim">Gross Margin (%)</span>
+                  <span className={`font-mono font-bold ${atTarget ? 'text-dq-success' : 'text-dq-danger'}`}>{fmtNum(summary.grossMarginPct)}%</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-dq-text-dim">Target Margin</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono">{rateCard.targetMargin}%</span>
+                    <span className={`text-xs font-heading font-semibold px-2 py-0.5 rounded-full ${atTarget ? 'bg-dq-success/20 text-dq-success' : 'bg-dq-danger/20 text-dq-danger'}`}>
+                      {atTarget ? 'PASS' : 'FAIL'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              {quote.priceOverrideNote && (
+                <div className="bg-dq-surface-light rounded-lg p-4">
+                  <div className="text-xs font-heading text-dq-text-dim uppercase mb-1">Price Override Note</div>
+                  <p className="text-sm text-dq-text">{quote.priceOverrideNote}</p>
+                </div>
+              )}
+            </div>
+          </SectionCard>
+
+          {/* TCO Detail */}
+          <SectionCard title="TCO Detail">
+            <div className="space-y-4 text-sm">
+              <div className="bg-dq-surface-light rounded-lg p-4">
+                <div className="text-xs font-heading text-dq-text-dim uppercase mb-2">LLM Cost Calculation</div>
+                <div className="font-mono text-xs text-dq-text-dim space-y-1">
+                  <div>Model: {tco.model ? tco.model.name : '—'}</div>
+                  <div>Daily input tokens: {(quote.tco.estimatedCallsPerDay * quote.tco.avgInputTokensPerCall).toLocaleString()}</div>
+                  <div>Daily output tokens: {(quote.tco.estimatedCallsPerDay * quote.tco.avgOutputTokensPerCall).toLocaleString()}</div>
+                  <div>Monthly input cost: {fmtDec((quote.tco.estimatedCallsPerDay * quote.tco.avgInputTokensPerCall * 30 / 1000000) * (tco.model ? tco.model.inputCostPer1MTokens : 0))}</div>
+                  <div>Monthly output cost: {fmtDec((quote.tco.estimatedCallsPerDay * quote.tco.avgOutputTokensPerCall * 30 / 1000000) * (tco.model ? tco.model.outputCostPer1MTokens : 0))}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="bg-dq-surface-light rounded-lg p-4 text-center">
+                  <div className="text-xs text-dq-text-dim mb-1">Low (0.5&times;)</div>
+                  <div className="font-mono text-lg">{fmtDec(tco.llmLow)}<span className="text-xs text-dq-text-dim">/mo</span></div>
+                  <div className="font-mono text-xs text-dq-text-dim mt-1">{fmt(tco.llmLow * 12)}/yr</div>
+                </div>
+                <div className="bg-dq-accent/5 border border-dq-accent/20 rounded-lg p-4 text-center">
+                  <div className="text-xs text-dq-accent mb-1">Medium (1&times;)</div>
+                  <div className="font-mono text-lg text-dq-accent">{fmtDec(tco.llmMed)}<span className="text-xs">/mo</span></div>
+                  <div className="font-mono text-xs text-dq-text-dim mt-1">{fmt(tco.annual.llm)}/yr</div>
+                </div>
+                <div className="bg-dq-surface-light rounded-lg p-4 text-center">
+                  <div className="text-xs text-dq-text-dim mb-1">High (2&times;)</div>
+                  <div className="font-mono text-lg">{fmtDec(tco.llmHigh)}<span className="text-xs text-dq-text-dim">/mo</span></div>
+                  <div className="font-mono text-xs text-dq-text-dim mt-1">{fmt(tco.llmHigh * 12)}/yr</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="flex justify-between py-2 border-b border-dq-border/30">
+                  <span className="text-dq-text-dim">Hosting (annual)</span>
+                  <span className="font-mono">{fmt(tco.annual.hostingLow)} – {fmt(tco.annual.hostingHigh)}</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-dq-border/30">
+                  <span className="text-dq-text-dim">Support (annual)</span>
+                  <span className="font-mono">{quote.tco.supportContractIncluded ? fmt(tco.annual.supportMid) : '—'}</span>
+                </div>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* 12-Month TCO */}
+          <SectionCard title="12-Month Total Cost of Ownership">
+            <div className="grid grid-cols-3 gap-4 text-sm mb-4">
+              <div className="flex justify-between"><span className="text-dq-text-dim">Annual LLM (medium)</span><span className="font-mono">{fmt(tco.annual.llm)}</span></div>
+              <div className="flex justify-between"><span className="text-dq-text-dim">Annual Hosting (mid)</span><span className="font-mono">{fmt(tco.annual.hostingMid)}</span></div>
+              <div className="flex justify-between"><span className="text-dq-text-dim">Annual Support</span><span className="font-mono">{quote.tco.supportContractIncluded ? fmt(tco.annual.supportMid) : '—'}</span></div>
+            </div>
+            <div className="bg-dq-accent/5 border border-dq-accent/20 rounded-lg p-4 flex justify-between items-center">
+              <span className="font-heading font-semibold text-white">Total 12-Month TCO</span>
+              <div className="text-right">
+                <div className="font-mono text-2xl text-dq-accent font-bold">{fmt(tco.totalAnnualLow)} – {fmt(tco.totalAnnualHigh)}</div>
+                <div className="font-mono text-xs text-dq-text-dim">Mid: {fmt(tco.totalAnnualMid)}</div>
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      );
+    }
+
+    // ─── App ───────────────────────────────────────────────────────────
+    function App() {
+      const [tab, setTab] = useState('builder');
+      const [showSettings, setShowSettings] = useState(false);
+      const [rateCard, setRateCard] = useState(() => store.get('devquote:ratecard') || DEFAULT_RATE_CARD);
+      const [settings, setSettings] = useState(() => store.get('devquote:settings') || DEFAULT_SETTINGS);
+      const [quoteList, setQuoteList] = useState(() => store.get('devquote:quotelist') || []);
+      const [quote, setQuote] = useState(() => createNewQuote(rateCard));
+      const [loaded, setLoaded] = useState(false);
+
+      // Hydrate from server on startup
+      useEffect(() => {
+        Promise.all([
+          store.load('devquote:ratecard'),
+          store.load('devquote:settings'),
+          store.load('devquote:quotelist'),
+        ]).then(([rc, s, ql]) => {
+          if (rc) setRateCard(rc);
+          if (s) setSettings(s);
+          if (ql) setQuoteList(ql);
+          setLoaded(true);
+        });
+      }, []);
+
+      // Persist rate card
+      useEffect(() => { if (loaded) store.set('devquote:ratecard', rateCard); }, [rateCard, loaded]);
+      // Persist settings
+      useEffect(() => { if (loaded) store.set('devquote:settings', settings); }, [settings, loaded]);
+      // Persist quote list
+      useEffect(() => { if (loaded) store.set('devquote:quotelist', quoteList); }, [quoteList, loaded]);
+
+      // Sync quote phases with rate card phases (add new, keep existing)
+      useEffect(() => {
+        setQuote(prev => {
+          const existing = new Set(prev.phases.map(p => p.phaseId));
+          const newPhases = rateCard.phases.filter(rp => !existing.has(rp.id)).map(rp => ({ phaseId: rp.id, hoursEstimate: 0, included: true, notes: '', hoursAdjustment: 0 }));
+          if (newPhases.length === 0) return prev;
+          return { ...prev, phases: [...prev.phases, ...newPhases] };
+        });
+      }, [rateCard.phases]);
+
+      function saveQuote() {
+        const updated = { ...quote, updatedAt: new Date().toISOString() };
+        store.set(`devquote:quote:${updated.id}`, updated);
+        setQuote(updated);
+        setQuoteList(prev => {
+          const filtered = prev.filter(q => q.id !== updated.id);
+          return [{ id: updated.id, projectName: updated.projectName, updatedAt: updated.updatedAt }, ...filtered];
+        });
+      }
+
+      async function loadQuote(id) {
+        const loaded = await store.load(`devquote:quote:${id}`);
+        if (loaded) setQuote(loaded);
+      }
+
+      function newQuote() {
+        setQuote(createNewQuote(rateCard));
+      }
+
+      function deleteQuote() {
+        store.del(`devquote:quote:${quote.id}`);
+        setQuoteList(prev => prev.filter(q => q.id !== quote.id));
+        newQuote();
+      }
+
+      const tabs = [
+        { id: 'builder', label: 'Quote Builder' },
+        { id: 'ratecard', label: 'Rate Card' },
+        { id: 'proposal', label: 'Proposal View' },
+        { id: 'internal', label: 'Internal View' },
+      ];
+
+      return (
+        <div className="min-h-screen">
+          {/* Navigation */}
+          <nav id="nav" className="no-print sticky top-0 z-40 bg-dq-bg/90 backdrop-blur-md border-b border-dq-border">
+            <div className="max-w-7xl mx-auto px-6 flex items-center h-14">
+              <div className="font-heading font-bold text-xl text-dq-accent tracking-tight mr-10">DevQuote</div>
+              <div className="flex gap-1">
+                {tabs.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    className={`px-4 py-2 text-sm font-heading font-medium rounded-lg transition-colors ${tab === t.id ? 'bg-dq-surface text-dq-accent' : 'text-dq-text-dim hover:text-white'}`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <div className="ml-auto">
+                <button onClick={() => setShowSettings(true)} className="text-dq-text-dim hover:text-white transition p-2 rounded-lg hover:bg-dq-surface" title="Settings">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </nav>
+
+          {/* Content */}
+          <main className="max-w-7xl mx-auto px-6 py-8">
+            {tab === 'builder' && (
+              <QuoteBuilder
+                quote={quote} setQuote={setQuote} rateCard={rateCard} settings={settings}
+                quoteList={quoteList} onSave={saveQuote} onNew={newQuote} onLoad={loadQuote} onDelete={deleteQuote}
+              />
+            )}
+            {tab === 'ratecard' && <RateCardTab rateCard={rateCard} setRateCard={setRateCard} />}
+            {tab === 'proposal' && <ProposalView quote={quote} rateCard={rateCard} settings={settings} />}
+            {tab === 'internal' && <InternalView quote={quote} rateCard={rateCard} />}
+          </main>
+
+          {/* Settings Modal */}
+          {showSettings && <SettingsModal settings={settings} onSave={setSettings} onClose={() => setShowSettings(false)} />}
+        </div>
+      );
+    }
+
+    // ─── Render ────────────────────────────────────────────────────────
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
