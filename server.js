@@ -10,10 +10,14 @@ const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
 app.use(express.json());
-app.use(express.static(__dirname));
 
-// Get all stored keys (or a specific key)
-app.get('/api/store/:key', (req, res) => {
+// Serve static files (with and without proxy prefix)
+const staticFiles = express.static(__dirname, { redirect: false });
+app.use('/integ-lab-quoting', staticFiles);
+app.use(staticFiles);
+
+// API routes (support both prefixed and direct)
+function getHandler(req, res) {
   const file = path.join(DATA_DIR, encodeURIComponent(req.params.key) + '.json');
   if (!fs.existsSync(file)) return res.json(null);
   try {
@@ -22,22 +26,27 @@ app.get('/api/store/:key', (req, res) => {
   } catch {
     res.json(null);
   }
-});
+}
 
-// Save a key
-app.put('/api/store/:key', (req, res) => {
+function putHandler(req, res) {
   const file = path.join(DATA_DIR, encodeURIComponent(req.params.key) + '.json');
   fs.writeFileSync(file, JSON.stringify(req.body, null, 2));
   res.json({ ok: true });
-});
+}
 
-// Delete a key
-app.delete('/api/store/:key', (req, res) => {
+function deleteHandler(req, res) {
   const file = path.join(DATA_DIR, encodeURIComponent(req.params.key) + '.json');
   if (fs.existsSync(file)) fs.unlinkSync(file);
   res.json({ ok: true });
-});
+}
 
-app.listen(PORT, () => {
-  console.log(`DevQuote running at http://localhost:${PORT}/devquote.html`);
+app.get('/api/store/:key', getHandler);
+app.put('/api/store/:key', putHandler);
+app.delete('/api/store/:key', deleteHandler);
+app.get('/integ-lab-quoting/api/store/:key', getHandler);
+app.put('/integ-lab-quoting/api/store/:key', putHandler);
+app.delete('/integ-lab-quoting/api/store/:key', deleteHandler);
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`DevQuote running on http://0.0.0.0:${PORT}`);
 });
